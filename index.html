@@ -23,7 +23,7 @@ body{background:var(--bg);color:var(--text);font-family:'IBM Plex Sans',sans-ser
 body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9999;opacity:.4;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 512 512' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");}
 
 /* ── LOCK ── */
-#lockScreen{position:fixed;inset:0;background:var(--bg);z-index:5000;display:none;align-items:center;justify-content:center;}
+#lockScreen{position:fixed;inset:0;background:var(--bg);z-index:5000;display:flex;align-items:center;justify-content:center;}
 #lockScreen.active{display:flex;}
 #lockScreen.hiding{animation:fadeOut .35s ease forwards;pointer-events:none;}
 @keyframes fadeOut{to{opacity:0;}}
@@ -788,7 +788,7 @@ async function boot(){
   initPw();
   const th=lget('jl_theme'); if(th) applyTheme(th);
   const ln=lget('jl_libname'); if(ln){ document.getElementById('lockTitle').textContent=ln; document.title=ln; }
-  document.getElementById('lockScreen').classList.add('active');
+
   setSyncUI('spin','lock');
   discoverBinId().then(()=>cloudLoad()).then(r=>{
     if(r){
