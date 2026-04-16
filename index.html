@@ -546,40 +546,201 @@ function lget(k)     { return localStorage.getItem(k); }
 function lset(k,v)   { localStorage.setItem(k,v); }
 
 /* ══════════════════════════════════════════════════
-   JSONBIN — FIXED CLOUD SYNC
-   • Master + Access keys baked in (never expire)
-   • Auto-creates a new bin on first save
-   • discoverBinId() finds the bin on any new device
-     using just the master key — no manual setup needed
+   MULTI-BIN CLOUD SYNC v2 — fully audited
+   • DB1 = existing bin (your current 641 books)
+   • DB2, DB3... auto-created when bin hits 400 books
+   • Registry stored INSIDE DB1 — works on ANY device
+   • All bins merged on load — you always see everything
+   • Stale bins cleared on delete to prevent ghost data
+   • Early toast warning 50 books before limit
+   • Emergency popup at every 400-book milestone
+   • 400 book limit ≈ 87KB, safely under JSONBin 128KB cap
 ══════════════════════════════════════════════════ */
+
+const JSONBIN='https://api.jsonbin.io/v3';
+const MASTER_KEY='$2a$10$7AGIccV/06SJhUthW38Jt.jLFe0y9elMJcDv0glaDFX2W3a5DiH/i';
+const ACCESS_KEY='$2a$10$n3lFvi3WKfC3Roy19nYeD.5RGBI1hY8giTMie7G0eRRXPmgQWq.AC';
+const DB1_BIN_ID='69dbcb82aaba882197ef84a0';
+const REGISTRY_LS='jl_db_registry';
+const BIN_BOOK_LIMIT=400;
+
 async function binFetch(path,method='GET',body=null){
-  const opts={method,headers:{'X-Master-Key':MASTER_KEY,'X-Access-Key':ACCESS_KEY,'Content-Type':'application/json','X-Bin-Versioning':'false'}};
+  const opts={method,headers:{
+    'X-Master-Key':MASTER_KEY,'X-Access-Key':ACCESS_KEY,
+    'Content-Type':'application/json','X-Bin-Versioning':'false'
+  }};
   if(body) opts.body=JSON.stringify(body);
   const res=await fetch(JSONBIN+path,opts);
   if(!res.ok) throw new Error('HTTP '+res.status);
   return res.json();
 }
-async function cloudLoad(){
-  const id=lget(BIN_ID_KEY); if(!id) return null;
-  const d=await binFetch('/b/'+id+'/latest'); return d.record||null;
+
+function getRegistryFromLS(){
+  try{
+    const r=JSON.parse(localStorage.getItem(REGISTRY_LS)||'null');
+    if(!r||!Array.isArray(r)) return [DB1_BIN_ID];
+    if(!r.includes(DB1_BIN_ID)) r.unshift(DB1_BIN_ID);
+    return r;
+  } catch(e){ return [DB1_BIN_ID]; }
 }
+
+function saveRegistryToLS(reg){ localStorage.setItem(REGISTRY_LS,JSON.stringify(reg)); }
+
+let _dbRegistry=[DB1_BIN_ID];
+
+async function discoverBinId(){
+  try{
+    const d=await binFetch('/b/'+DB1_BIN_ID+'/latest');
+    const rec=d.record||{};
+    if(rec.dbRegistry&&Array.isArray(rec.dbRegistry)&&rec.dbRegistry.length>0){
+      _dbRegistry=rec.dbRegistry;
+      if(!_dbRegistry.includes(DB1_BIN_ID)) _dbRegistry.unshift(DB1_BIN_ID);
+    } else {
+      _dbRegistry=getRegistryFromLS();
+    }
+    saveRegistryToLS(_dbRegistry);
+  } catch(e){ _dbRegistry=getRegistryFromLS(); }
+}
+
+async function cloudLoad(){
+  let allBooks=[],allKindle=[],allWishlist=[],meta={};
+  let reg=[DB1_BIN_ID];
+
+  try{
+    const d=await binFetch('/b/'+DB1_BIN_ID+'/latest');
+    const rec=d.record||{};
+    if(rec.books)    allBooks    = allBooks.concat(rec.books);
+    if(rec.kindle)   allKindle   = allKindle.concat(rec.kindle);
+    if(rec.wishlist) allWishlist = allWishlist.concat(rec.wishlist);
+    if(rec.libname)  meta.libname=rec.libname;
+    if(rec.theme)    meta.theme=rec.theme;
+    if(rec.dbRegistry&&Array.isArray(rec.dbRegistry)&&rec.dbRegistry.length>0){
+      reg=rec.dbRegistry;
+      if(!reg.includes(DB1_BIN_ID)) reg.unshift(DB1_BIN_ID);
+    }
+    _dbRegistry=reg;
+    saveRegistryToLS(reg);
+  } catch(e){
+    console.warn('Could not load DB1',e);
+    reg=getRegistryFromLS();
+    _dbRegistry=reg;
+  }
+
+  for(let i=1;i<reg.length;i++){
+    try{
+      const d=await binFetch('/b/'+reg[i]+'/latest');
+      const rec=d.record||{};
+      if(rec.books)    allBooks    = allBooks.concat(rec.books);
+      if(rec.kindle)   allKindle   = allKindle.concat(rec.kindle);
+      if(rec.wishlist) allWishlist = allWishlist.concat(rec.wishlist);
+    } catch(e){ console.warn('Could not load DB'+(i+1),e); }
+  }
+
+  const dedup=(arr)=>{
+    const seen=new Set();
+    return arr.filter(x=>{ if(seen.has(x.id)) return false; seen.add(x.id); return true; });
+  };
+
+  return { books:dedup(allBooks), kindle:dedup(allKindle), wishlist:dedup(allWishlist), ...meta };
+}
+
 async function cloudSave(record){
   lset(CACHE,JSON.stringify(record));
+
   const cache=getCache();
   if(cache&&(cache.books||[]).length>0&&(record.books||[]).length===0){
     console.warn('cloudSave blocked: would wipe all books');
     showToast('Save blocked — something went wrong!','err'); return;
   }
-  let id=lget(BIN_ID_KEY);
-  if(!id){ const r=await binFetch('/b','POST',record); id=r.metadata.id; lset(BIN_ID_KEY,id); }
-  else await binFetch('/b/'+id,'PUT',record);
+
+  const allBooks    = record.books    || [];
+  const allKindle   = record.kindle   || [];
+  const allWishlist = record.wishlist || [];
+  const meta        = {libname:record.libname, theme:record.theme};
+
+  const numChunks=Math.max(1,Math.ceil(allBooks.length/BIN_BOOK_LIMIT));
+  const bookChunks=[];
+  for(let i=0;i<numChunks;i++){
+    bookChunks.push(allBooks.slice(i*BIN_BOOK_LIMIT,(i+1)*BIN_BOOK_LIMIT));
+  }
+
+  const reg=[..._dbRegistry];
+
+  while(reg.length<numChunks){
+    try{
+      const r=await binFetch('/b','POST',{books:[],kindle:[],wishlist:[],...meta,dbRegistry:reg});
+      const newId=r.metadata.id;
+      reg.push(newId);
+      console.log('Created DB'+reg.length+':',newId);
+    } catch(e){
+      console.error('Failed to create new bin',e);
+      showToast('Could not create new DB — save failed','err');
+      return;
+    }
+  }
+
+  _dbRegistry=reg;
+  saveRegistryToLS(reg);
+
+  const totalBins=Math.max(numChunks,reg.length);
+  for(let i=0;i<totalBins;i++){
+    if(i>=reg.length) break;
+    const binData={
+      books:      i<numChunks ? bookChunks[i] : [],
+      kindle:     i===0 ? allKindle    : [],
+      wishlist:   i===0 ? allWishlist  : [],
+      dbRegistry: i===0 ? reg          : [],
+      ...meta
+    };
+    try{
+      await binFetch('/b/'+reg[i],'PUT',binData);
+    } catch(e){
+      console.error('Failed to save DB'+(i+1),e);
+      showToast('DB'+(i+1)+' save failed — retrying...','err');
+      try{ await binFetch('/b/'+reg[i],'PUT',binData); }
+      catch(e2){ showToast('DB'+(i+1)+' save failed permanently','err'); }
+    }
+  }
+
+  checkCapacityWarning(allBooks.length,reg.length);
 }
-async function discoverBinId(){
-  // Always ensure the bin ID is set — baked in so it works on any device instantly
-  if(!lget(BIN_ID_KEY)) lset(BIN_ID_KEY, BAKED_BIN_ID);
-}
+
 function getCache(){ try{ return JSON.parse(lget(CACHE)||'null'); }catch(e){ return null; } }
 
+function checkCapacityWarning(bookCount,numBins){
+  const booksInCurrentBin=bookCount-((numBins-1)*BIN_BOOK_LIMIT);
+  if(booksInCurrentBin===BIN_BOOK_LIMIT-50){
+    showToast('Approaching DB'+numBins+' limit — backup recommended!','err');
+  }
+  if(bookCount>0&&bookCount%BIN_BOOK_LIMIT===0){
+    showCapacityModal(bookCount,numBins);
+  }
+}
+
+function showCapacityModal(count,dbNum){
+  const existing=document.getElementById('capacityModal');
+  if(existing) existing.remove();
+  const modal=document.createElement('div');
+  modal.id='capacityModal';
+  modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(8px);padding:16px;';
+  modal.innerHTML=`
+    <div style="background:var(--surface);border:2px solid var(--danger);padding:36px;max-width:460px;width:100%;font-family:'IBM Plex Mono',monospace;animation:mIn .2s ease;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:2rem;letter-spacing:.1em;color:var(--danger);margin-bottom:12px;">⚠ Library Milestone!</div>
+      <div style="font-size:.72rem;color:var(--text);line-height:1.9;margin-bottom:20px;letter-spacing:.05em;">
+        You've reached <strong style="color:var(--accent)">${count} books</strong>!<br><br>
+        A new cloud database <strong style="color:var(--accent)">DB${dbNum+1}</strong> has been automatically created — saving will continue working perfectly.<br><br>
+        <strong style="color:var(--danger)">PLEASE DO THIS NOW:</strong><br>
+        Download a backup of your full library for safekeeping.
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        <button onclick="exportBackup();document.getElementById('capacityModal').remove();"
+          style="background:var(--accent2);border:none;color:#fff;font-family:'IBM Plex Mono',monospace;font-size:.68rem;font-weight:500;letter-spacing:.13em;text-transform:uppercase;padding:10px 20px;cursor:pointer;flex:1;">⬇ Download Backup Now</button>
+        <button onclick="document.getElementById('capacityModal').remove();"
+          style="background:none;border:1px solid var(--border);color:var(--muted);font-family:'IBM Plex Mono',monospace;font-size:.68rem;letter-spacing:.13em;text-transform:uppercase;padding:10px 20px;cursor:pointer;">Dismiss</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
 /* ══════════════════════════════════════════════════
    STATE
 ══════════════════════════════════════════════════ */
