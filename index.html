@@ -569,10 +569,10 @@ async function binFetch(path,method='GET',body=null){
     'X-Master-Key':MASTER_KEY,'X-Access-Key':ACCESS_KEY,
     'Content-Type':'application/json','X-Bin-Versioning':'false'
   }};
-  if(body) opts.body=JSON.stringify(body);
+  /*if(body) opts.body=JSON.stringify(body);
   const res=await fetch(JSONBIN+path,opts);
   if(!res.ok) throw new Error('HTTP '+res.status);
-  return res.json();
+  return res.json();*/
 }
 
 function getRegistryFromLS(){
