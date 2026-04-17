@@ -591,12 +591,21 @@ let saveTimer=null, showDups=false, showDupsKindle=false;
 
 function buildRecord(){ return {books,kindle,wishlist,libname:libName,theme:lget('jl_theme')||'dark'}; }
 function applyRecord(r){
-  if(!r) return;
-  if(r.books)    books=r.books;
-  if(r.kindle)   kindle=r.kindle||[];
-  if(r.wishlist) wishlist=r.wishlist;
-  if(r.libname)  { libName=r.libname; setLibNameDisplay(r.libname); }
-  if(r.theme)    applyTheme(r.theme);
+  if(!r || typeof r !== 'object') return;
+
+  books = Array.isArray(r.books) ? r.books : [];
+  kindle = Array.isArray(r.kindle) ? r.kindle : [];
+  wishlist = Array.isArray(r.wishlist) ? r.wishlist : [];
+
+  libName = typeof r.libname === 'string' && r.libname.trim()
+    ? r.libname
+    : "Jimmy's Library";
+
+  setLibNameDisplay(libName);
+
+  if (r.theme === 'ivory' || r.theme === 'dark') {
+    applyTheme(r.theme);
+  }
 }
 
 function scheduleSave(){
